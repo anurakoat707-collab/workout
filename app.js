@@ -71,7 +71,8 @@
   /* ===================================================================== storage */
   let S = load();
   let A = loadActive();
-  function blank() { return { v: 2, workouts: [], routines: [], body: [], exercises: [], settings: { rest: 90 } }; }
+  /* settings.goalKg = target body weight (null = none), goalDir = 'lose' | 'gain' | 'keep' | 'none' */
+  function blank() { return { v: 2, workouts: [], routines: [], body: [], exercises: [], settings: { rest: 90, goalKg: null, goalDir: 'none' } }; }
   function seedRoutines(st) {
     st.routines = DEFAULT_ROUTINES.map(r => ({ id: uid(), name: r.name, exercises: r.exercises.map(([name, sets, reps, rest]) => ({ name, sets, reps, rest })) }));
   }
@@ -340,7 +341,8 @@
       + '<div class="week">' + ws7.map((d, i) => '<span><i class="' + (days.has(d) ? 'on' : '') + (d === t ? ' today' : '') + '">' + (days.has(d) ? '✓' : '') + '</i>' + TH_DS[i] + '</span>').join('') + '</div></div>'
       + '<div class="stat"><div class="k">เดือนนี้</div><div class="v">' + month.length + '<small>ครั้ง</small></div><div class="s">' + month.reduce((a, w) => a + wSets(w), 0) + ' เซ็ต · ' + fmt(month.reduce((a, w) => a + wVolume(w), 0) / 1000) + ' ตัน</div></div>'
       + '<div class="stat tap" data-act="body"><div class="k">น้ำหนักตัว</div>'
-      + (lastBody ? '<div class="v">' + fmt(lastBody.kg) + '<small>kg</small></div><div class="s">' + (ref30 ? deltaHtml(lastBody.kg - ref30.kg, 'kg', true) + ' ใน 4 สัปดาห์' : thShort(lastBody.date)) + '</div>'
+      + (lastBody ? '<div class="v">' + fmt(lastBody.kg) + '<small>kg</small></div><div class="s">' + (ref30 ? bodyDelta(lastBody.kg - ref30.kg, 'kg') + ' ใน 4 สัปดาห์' : thShort(lastBody.date)) + '</div>'
+        + sparkline(body) + (S.settings.goalKg ? '<div class="s goal-s">🎯 ' + esc(goalLeft(bodyAvg(body).pop().y)) + '</div>' : '')
         : '<div class="v" style="font-size:20px;margin-top:8px">+ บันทึก</div><div class="s">แตะเพื่อเพิ่ม</div>') + '</div></div>';
 
     h += '<div class="section-title"><h2>Workout ล่าสุด</h2>' + (last ? '<button type="button" class="link" data-act="all-history">ดูทั้งหมด</button>' : '') + '</div>';
@@ -379,6 +381,62 @@
     if (Math.abs(d) < 0.05) { return '<span class="same">±0 ' + unit + '</span>'; }
     const good = lowerIsGood ? d < 0 : d > 0;
     return '<span class="' + (good ? 'up' : 'down') + '">' + (d > 0 ? '+' : '') + fmt(d) + ' ' + unit + '</span>';
+  }
+
+  /* ----------------------------------------------------------- body weight trend */
+  /** Body weight change, coloured by the goal: lose -> down is green, gain -> up is green, otherwise neutral. */
+  function bodyDelta(d, unit) {
+    if (Math.abs(d) < 0.05) { return '<span class="same">±0 ' + unit + '</span>'; }
+    const dir = S.settings.goalDir;
+    const cls = dir === 'lose' ? (d < 0 ? 'up' : 'down') : dir === 'gain' ? (d > 0 ? 'up' : 'down') : dir === 'keep' ? 'down' : 'same';
+    return '<span class="' + cls + '">' + (d > 0 ? '+' : '') + fmt(d) + ' ' + unit + '</span>';
+  }
+  /** 7-day average for every weigh-in (mean of the weigh-ins of that day and the 6 days before). list = sorted by date */
+  function bodyAvg(list) {
+    return list.map(b => {
+      const from = addDays(b.date, -6), win = list.filter(x => x.date >= from && x.date <= b.date);
+      return { d: b.date, y: win.reduce((a, x) => a + x.kg, 0) / win.length };
+    });
+  }
+  /** kg per week from a straight line through the weigh-ins (null when they cover less than 7 days). */
+  function bodyRate(list) {
+    if (list.length < 2 || diffDays(list[0].date, list[list.length - 1].date) < 7) { return null; }
+    const t0 = parse(list[0].date).getTime();
+    const xs = list.map(b => (parse(b.date).getTime() - t0) / (7 * 864e5)), ys = list.map(b => b.kg);
+    const mx = xs.reduce((a, b) => a + b, 0) / xs.length, my = ys.reduce((a, b) => a + b, 0) / ys.length;
+    let sxx = 0, sxy = 0;
+    xs.forEach((x, i) => { sxx += (x - mx) ** 2; sxy += (x - mx) * (ys[i] - my); });
+    return sxx ? sxy / sxx : null;
+  }
+  /** "เหลืออีก 3.2 kg" / "ถึงเป้าแล้ว" ('' without a goal). */
+  function goalLeft(kg) {
+    const g = S.settings.goalKg, dir = S.settings.goalDir;
+    if (!g) { return ''; }
+    if (Math.abs(g - kg) < 0.1 || (dir === 'lose' && kg <= g) || (dir === 'gain' && kg >= g)) { return dir === 'keep' ? 'อยู่ที่เป้า' : 'ถึงเป้าแล้ว 🎉'; }
+    return 'เหลืออีก ' + fmt(Math.abs(g - kg)) + ' kg';
+  }
+  /** Estimated date the goal is reached at the current rate ('' when moving away from it or no goal). */
+  function goalEta(kg, rate) {
+    const g = S.settings.goalKg;
+    if (!g || rate == null || Math.abs(rate) < 0.05 || S.settings.goalDir === 'keep') { return ''; }
+    const weeks = (g - kg) / rate;
+    if (weeks <= 0 || weeks > 260) { return ''; }
+    return 'ถึงเป้าประมาณ ' + thShort(addDays(today(), Math.round(weeks * 7)));
+  }
+  /** Tiny trend line (7-day average of the last 30 days) for the dashboard. */
+  function sparkline(list) {
+    const pts = bodyAvg(list).filter(p => p.d > addDays(today(), -30));
+    if (pts.length < 2) { return ''; }
+    const W = 160, H = 34, ys = pts.map(p => p.y), xs = pts.map(p => parse(p.d).getTime());
+    const goal = S.settings.goalKg;
+    let y0 = Math.min(...ys), y1 = Math.max(...ys);
+    if (goal && Math.abs(goal - (y0 + y1) / 2) < 6) { y0 = Math.min(y0, goal); y1 = Math.max(y1, goal); }
+    if (y1 - y0 < 0.5) { y0 -= 0.25; y1 += 0.25; }
+    const X = t => (t - xs[0]) / ((xs[xs.length - 1] - xs[0]) || 1) * (W - 6) + 3, Y = v => H - 3 - (v - y0) / (y1 - y0) * (H - 6);
+    const d = pts.map((p, i) => (i ? 'L' : 'M') + X(xs[i]).toFixed(1) + ' ' + Y(p.y).toFixed(1)).join(' ');
+    return '<svg class="spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">'
+      + (goal && goal >= y0 && goal <= y1 ? '<line x1="0" x2="' + W + '" y1="' + Y(goal).toFixed(1) + '" y2="' + Y(goal).toFixed(1) + '" class="spark-goal"/>' : '')
+      + '<path d="' + d + '" class="spark-line"/><circle cx="' + X(xs[xs.length - 1]).toFixed(1) + '" cy="' + Y(ys[ys.length - 1]).toFixed(1) + '" r="3" class="spark-dot"/></svg>';
   }
   $('tab-home').addEventListener('click', e => {
     const a = e.target.closest('[data-act]');
@@ -840,13 +898,22 @@
     if (pPeriod === 'all') { const first = S.workouts.concat(S.body).map(x => x.date).sort()[0] || t; return [first, t]; }
     return [addDays(t, -num(pPeriod) + 1), t];
   }
-  function lineChart(points, unit) {
+  /**
+   * points = [{ d, y, pr }]   opt.avg = [{ d, y }] trend line drawn on top (points become faint dots)
+   *                           opt.goal = number -> dashed target line
+   */
+  function lineChart(points, unit, opt) {
+    opt = opt || {};
     if (points.length < 2) {
       return '<div class="empty" style="padding:22px 6px">' + (points.length ? 'มีข้อมูล 1 ครั้งในช่วงนี้ — ต้องมี 2 ครั้งขึ้นไปถึงจะเห็นกราฟ' : 'ไม่มีข้อมูลในช่วงนี้') + '</div>';
     }
     const W = 600, H = 250, L = 58, Rr = 16, T = 18, B = 36;
     const xs = points.map(p => parse(p.d).getTime()), ys = points.map(p => p.y);
+    const avg = opt.avg && opt.avg.length > 1 ? opt.avg : null;
     let y0 = Math.min(...ys), y1 = Math.max(...ys);
+    /* show the goal line only when it is reasonably close (otherwise the curve becomes flat) */
+    const goal = opt.goal && Math.abs(opt.goal - (y0 + y1) / 2) <= Math.max(8, (y1 - y0) * 2) ? opt.goal : null;
+    if (goal) { y0 = Math.min(y0, goal); y1 = Math.max(y1, goal); }
     const py = (y1 - y0) * 0.15 || Math.max(1, y1 * 0.05); y0 = Math.max(0, y0 - py); y1 += py;
     const x0 = xs[0], x1 = xs[xs.length - 1] === x0 ? x0 + 864e5 : xs[xs.length - 1];
     const X = t => L + (t - x0) / (x1 - x0) * (W - L - Rr), Y = v => T + (1 - (v - y0) / (y1 - y0)) * (H - T - B);
@@ -860,6 +927,20 @@
       g += '<text class="lbl" x="' + X(xs[i]) + '" y="' + (H - 8) + '" text-anchor="' + (k === 0 ? 'start' : k === arr.length - 1 ? 'end' : 'middle') + '">' + thShort(points[i].d) + '</text>';
     });
     const path = points.map((p, i) => (i ? 'L' : 'M') + X(xs[i]).toFixed(1) + ' ' + Y(p.y).toFixed(1)).join(' ');
+    if (goal) {
+      g += '<line class="goal" x1="' + L + '" x2="' + (W - Rr) + '" y1="' + Y(goal).toFixed(1) + '" y2="' + Y(goal).toFixed(1) + '"/>'
+         + '<text class="goal-lbl" x="' + (W - Rr) + '" y="' + (Y(goal) - 8).toFixed(1) + '" text-anchor="end">เป้า ' + fmt(goal) + '</text>';
+    }
+    if (avg) {
+      const ap = avg.map(p => (p === avg[0] ? 'M' : 'L') + X(parse(p.d).getTime()).toFixed(1) + ' ' + Y(p.y).toFixed(1)).join(' ');
+      g += '<path class="area" d="' + ap + ' L' + X(xs[xs.length - 1]).toFixed(1) + ' ' + (H - B) + ' L' + X(xs[0]).toFixed(1) + ' ' + (H - B) + 'Z"/>'
+         + '<path class="line faint" d="' + path + '"/><path class="line" d="' + ap + '"/>';
+      points.forEach((p, i) => { g += '<circle class="pt raw" cx="' + X(xs[i]).toFixed(1) + '" cy="' + Y(p.y).toFixed(1) + '" r="3.5"><title>' + thShort(p.d) + ': ' + fmt(p.y) + ' ' + unit + ' (เฉลี่ย 7 วัน ' + fmt(avg[i] ? avg[i].y : p.y) + ')</title></circle>'; });
+      const la = avg[avg.length - 1];
+      g += '<circle class="pt" cx="' + X(parse(la.d).getTime()).toFixed(1) + '" cy="' + Y(la.y).toFixed(1) + '" r="6"/>';
+      return '<div class="chart">' + g + '</svg></div>'
+        + '<div class="legend"><span><i class="lg-dot"></i>ชั่งจริง</span><span><i class="lg-line"></i>ค่าเฉลี่ย 7 วัน</span>' + (goal ? '<span><i class="lg-goal"></i>เป้าหมาย</span>' : '') + '</div>';
+    }
     g += '<path class="area" d="' + path + ' L' + X(xs[xs.length - 1]).toFixed(1) + ' ' + (H - B) + ' L' + X(xs[0]).toFixed(1) + ' ' + (H - B) + 'Z"/><path class="line" d="' + path + '"/>';
     points.forEach((p, i) => { g += '<circle class="pt' + (p.pr ? ' pr' : '') + '" cx="' + X(xs[i]).toFixed(1) + '" cy="' + Y(p.y).toFixed(1) + '" r="' + (p.pr ? 6.5 : 5) + '"><title>' + thShort(p.d) + ': ' + fmt(p.y) + ' ' + unit + '</title></circle>'; });
     return '<div class="chart">' + g + '</svg></div>';
@@ -934,10 +1015,25 @@
 
     /* body weight */
     const body = S.body.slice().sort(byTime), bIn = body.filter(b => b.date >= from && b.date <= to);
-    h += '<div class="card"><div class="card-head"><h3>น้ำหนักตัว</h3><button type="button" class="btn primary sm" data-pact="body">+ บันทึก</button></div>'
-      + (body.length ? '<div class="row2"><div class="cmp"><div class="k">ล่าสุด</div><div class="v">' + fmt(body[body.length - 1].kg) + ' <small class="muted" style="font-size:13px">kg</small></div><div class="d muted">' + thShort(body[body.length - 1].date) + '</div></div>'
-        + '<div class="cmp"><div class="k">เปลี่ยนแปลงในช่วงนี้</div><div class="v">' + (bIn.length > 1 ? deltaHtml(bIn[bIn.length - 1].kg - bIn[0].kg, 'kg', true) : '—') + '</div><div class="d muted">' + bIn.length + ' ครั้งที่ชั่ง</div></div></div>' : '')
-      + lineChart(bIn.map(b => ({ d: b.date, y: b.kg })), 'kg')
+    const avgIn = bodyAvg(body).filter(p => p.d >= from && p.d <= to);        // average uses the days before the period too
+    const lastB = body[body.length - 1], lastAvg = body.length ? bodyAvg(body).pop().y : null;
+    const rate = bodyRate(bIn), goal = S.settings.goalKg;
+    const dirTxt = { lose: 'ลดน้ำหนัก', gain: 'เพิ่มน้ำหนัก', keep: 'รักษาน้ำหนัก' }[S.settings.goalDir] || '';
+    const kgS = ' <small class="muted" style="font-size:13px">kg</small>';
+    h += '<div class="card"><div class="card-head"><h3>น้ำหนักตัว</h3><button type="button" class="btn primary sm" data-pact="body">+ บันทึก</button></div>';
+    if (body.length) {
+      h += '<div class="cmp-grid">'
+        + '<div class="cmp"><div class="k">ล่าสุด</div><div class="v">' + fmt(lastB.kg) + kgS + '</div><div class="d muted">' + thShort(lastB.date) + '</div></div>'
+        + '<div class="cmp"><div class="k">ค่าเฉลี่ย 7 วัน</div><div class="v">' + fmt(lastAvg) + kgS + '</div><div class="d muted">แนวโน้มจริง ไม่แกว่งตามวัน</div></div>'
+        + '<div class="cmp"><div class="k">เปลี่ยนแปลงในช่วงนี้</div><div class="v">' + (avgIn.length > 1 ? bodyDelta(avgIn[avgIn.length - 1].y - avgIn[0].y, 'kg') : '—') + '</div><div class="d muted">' + bIn.length + ' ครั้งที่ชั่ง (เทียบค่าเฉลี่ย)</div></div>'
+        + '<div class="cmp"><div class="k">อัตราต่อสัปดาห์</div><div class="v">' + (rate == null ? '—' : bodyDelta(rate, 'kg')) + '</div><div class="d muted">' + (rate == null ? 'ต้องมีข้อมูล 7 วันขึ้นไป' : Math.abs(rate) > 1 ? 'เร็วกว่าปกติ (เกิน 1 kg)' : 'ในช่วงนี้') + '</div></div></div>';
+      h += '<div class="goal-box">' + (goal
+        ? '<div><div class="k">🎯 เป้าหมาย: ' + esc(dirTxt) + '</div><b>' + fmt(goal) + ' kg</b> · ' + esc(goalLeft(lastAvg))
+          + (goalEta(lastAvg, rate) ? '<div class="d muted">' + esc(goalEta(lastAvg, rate)) + ' (ตามอัตราปัจจุบัน)</div>' : '') + '</div>'
+        : '<div><div class="k">🎯 ยังไม่ได้ตั้งเป้าหมาย</div><span class="muted small">ตั้งเป้าแล้วจะเห็นเส้นเป้าบนกราฟ และเหลืออีกกี่ kg</span></div>')
+        + '<button type="button" class="btn soft sm" data-pact="goal">' + (goal ? 'แก้เป้า' : 'ตั้งเป้า') + '</button></div>';
+    }
+    h += lineChart(bIn.map(b => ({ d: b.date, y: b.kg })), 'kg', { avg: avgIn, goal })
       + (body.length ? '<button type="button" class="link" data-pact="body-list">ดู / แก้ไขประวัติน้ำหนัก</button>' : '') + '</div>';
 
     /* records */
@@ -964,8 +1060,34 @@
     const pm = e.target.closest('[data-pm]'); if (pm) { pMetric = pm.dataset.pm; renderProgress(); return; }
     const px = e.target.closest('[data-pex]'); if (px) { pEx = px.dataset.pex; renderProgress(); $('p-ex').scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
     const pa = e.target.closest('[data-pact]');
-    if (pa) { pa.dataset.pact === 'body' ? bodySheet() : bodyListSheet(); }
+    if (pa) { ({ body: bodySheet, 'body-list': bodyListSheet, goal: goalSheet })[pa.dataset.pact](); }
   });
+
+  /** Target body weight + direction (colours of the changes follow it). */
+  function goalSheet() {
+    const st = S.settings, last = S.body.slice().sort(byTime).pop();
+    let dir = st.goalDir && st.goalDir !== 'none' ? st.goalDir : 'lose';
+    openSheet('<h2>เป้าหมายน้ำหนักตัว</h2><p class="lead">' + (last ? 'ตอนนี้ ' + fmt(last.kg) + ' kg' : 'ยังไม่มีบันทึกน้ำหนัก') + '</p>'
+      + '<div class="pick-h">อยากทำอะไร</div><div class="chips" style="padding:6px 0" id="g-dir">'
+      + [['lose', 'ลดน้ำหนัก'], ['gain', 'เพิ่มน้ำหนัก / กล้าม'], ['keep', 'รักษาน้ำหนัก']].map(([k, l]) => '<button type="button" class="chip' + (dir === k ? ' is-on' : '') + '" data-dir="' + k + '">' + l + '</button>').join('') + '</div>'
+      + '<label class="field"><span>น้ำหนักเป้าหมาย (kg)</span><input type="number" id="g-kg" step="0.1" min="20" max="300" inputmode="decimal" value="' + (st.goalKg || '') + '" placeholder="' + (last ? fmt(last.kg) : '70.0') + '"></label>'
+      + '<p class="muted small" style="margin-top:8px">สีของการเปลี่ยนแปลงจะเป็นไปตามเป้า เช่น ลดน้ำหนัก: ลดลง = สีเขียว · เพิ่มน้ำหนัก: เพิ่มขึ้น = สีเขียว</p>'
+      + '<div class="btn-row" style="margin-top:16px">' + (st.goalKg ? '<button type="button" class="btn danger" id="g-clear">ลบเป้า</button>' : '<button type="button" class="btn soft" data-close>ยกเลิก</button>')
+      + '<button type="button" class="btn primary" id="g-save">บันทึกเป้า</button></div>',
+      sh => {
+        sh.querySelector('#g-dir').addEventListener('click', e => {
+          const b = e.target.closest('[data-dir]'); if (!b) { return; }
+          dir = b.dataset.dir; sh.querySelectorAll('#g-dir .chip').forEach(c => c.classList.toggle('is-on', c === b));
+        });
+        sh.querySelector('#g-save').onclick = () => {
+          const kg = num(sh.querySelector('#g-kg').value);
+          if (kg < 20 || kg > 300) { toast('ใส่น้ำหนักเป้าหมาย 20 - 300 kg'); return; }
+          st.goalKg = kg; st.goalDir = dir; save(); closeSheet(); render(); toast('ตั้งเป้า ' + fmt(kg) + ' kg แล้ว');
+        };
+        const c = sh.querySelector('#g-clear');
+        if (c) { c.onclick = () => { st.goalKg = null; st.goalDir = 'none'; save(); closeSheet(); render(); toast('ลบเป้าแล้ว'); }; }
+      });
+  }
 
   /* ===================================================================== body weight sheets */
   function bodySheet() {
@@ -989,7 +1111,7 @@
     const list = S.body.slice().sort(byTime).reverse();
     openSheet('<h2>ประวัติน้ำหนักตัว</h2><div class="pick-list">' + list.map((b, i) => {
       const p = list[i + 1];
-      return '<div class="pick"><span>' + thShort(b.date) + '</span><span><b>' + fmt(b.kg) + ' kg</b> ' + (p ? '<small>' + deltaHtml(b.kg - p.kg, '', true) + '</small>' : '') + ' <button type="button" class="link danger" data-bdel="' + b.date + '">ลบ</button></span></div>';
+      return '<div class="pick"><span>' + thShort(b.date) + '</span><span><b>' + fmt(b.kg) + ' kg</b> ' + (p ? '<small>' + bodyDelta(b.kg - p.kg, '') + '</small>' : '') + ' <button type="button" class="link danger" data-bdel="' + b.date + '">ลบ</button></span></div>';
     }).join('') + '</div>',
       sh => sh.addEventListener('click', async e => {
         const d = e.target.dataset.bdel; if (!d) { return; }
